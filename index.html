@@ -377,6 +377,12 @@ body.light .theme-toggle::after{left:calc(100% - 18px);}
 .zoom-row{display:flex;align-items:center;gap:8px;margin-top:8px;}
 .zoom-row span{font-size:10px;color:var(--txt-dim);}
 .zoom-btn{width:30px;height:30px;border-radius:8px;background:var(--card2);border:1px solid var(--line);color:var(--txt);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+/* ---------- d-pad ---------- */
+.dpad-wrap{display:grid;grid-template-columns:44px 44px 44px;grid-template-rows:44px 44px 44px;gap:4px;justify-content:center;margin:0 auto;}
+.dpad-btn{width:44px;height:44px;border-radius:10px;background:var(--card2);border:1px solid var(--violet-dim);color:var(--violet);font-size:0;cursor:pointer;display:flex;align-items:center;justify-content:center;touch-action:manipulation;user-select:none;}
+.dpad-btn:active{background:var(--violet-dim);}
+.dpad-btn svg{width:18px;height:18px;fill:currentColor;pointer-events:none;}
+.dpad-center{width:44px;height:44px;border-radius:10px;background:var(--bg-deep);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:9px;font-weight:700;color:#ffd600;text-align:center;line-height:1.2;}
 
 /* ---------- replay mode ---------- */
 .replay-panel{background:var(--card2);border:1px solid var(--violet-dim);border-radius:12px;padding:14px;margin-bottom:14px;}
@@ -2037,18 +2043,22 @@ function renderCurveEditor(){
     <div class="ce-info" id="ceInfo">Seret kurva — awal & akhir terkunci | gunakan tombol ↑↓←→ untuk presisi</div>
     <div style="background:var(--card);border:1px solid var(--violet-dim);border-radius:10px;padding:10px;margin:8px 0">
       <div style="font-size:10px;color:var(--txt-faint);margin-bottom:8px;text-align:center;letter-spacing:.04em">NAVIGASI TITIK — PRESISI TANPA GAUSSIAN</div>
-      <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:8px">
-        <button class="btn sm" id="ceBtnLeft" style="min-width:44px;min-height:44px;font-size:20px;padding:0;touch-action:manipulation">←</button>
-        <div id="ceSelInfo" style="font-family:var(--mono);font-size:10px;min-width:110px;text-align:center;color:#ffd600;font-weight:700">Trade #1</div>
-        <button class="btn sm" id="ceBtnRight" style="min-width:44px;min-height:44px;font-size:20px;padding:0;touch-action:manipulation">→</button>
+      <div class="dpad-wrap">
+        <div></div>
+        <button class="dpad-btn" id="ceBtnUp"><svg viewBox="0 0 24 24"><path d="M12 4l8 14H4z"/></svg></button>
+        <div></div>
+        <button class="dpad-btn" id="ceBtnLeft"><svg viewBox="0 0 24 24"><path d="M20 12l-14 8V4z"/></svg></button>
+        <div class="dpad-center" id="ceDpadCtr">#1</div>
+        <button class="dpad-btn" id="ceBtnRight"><svg viewBox="0 0 24 24"><path d="M4 12l14-8v16z"/></svg></button>
+        <div></div>
+        <button class="dpad-btn" id="ceBtnDown"><svg viewBox="0 0 24 24"><path d="M12 20l-8-14h16z"/></svg></button>
+        <div></div>
       </div>
-      <div style="display:flex;justify-content:center;gap:10px">
-        <button class="btn sm" id="ceBtnUp" style="min-width:44px;min-height:44px;font-size:20px;padding:0;touch-action:manipulation">↑</button>
-        <button class="btn sm" id="ceBtnDown" style="min-width:44px;min-height:44px;font-size:20px;padding:0;touch-action:manipulation">↓</button>
-      </div>
+      <div id="ceSelInfo" style="font-family:var(--mono);font-size:10px;text-align:center;color:#ffd600;font-weight:700;margin-top:6px">Trade #1  •  val: 0</div>
     </div>
     <div class="ce-toolbar">
       <button class="btn sm" onclick="ceSmoothAll()">〰 Haluskan</button>
+      <button class="btn sm" onclick="ceRandomMove()">&#127922; Random</button>
       <button class="btn sm" onclick="ceFlip()">↕ Balik</button>
       <button class="btn sm primary" onclick="ceApply()">✓ Terapkan ke AI</button>
     </div>
@@ -2297,6 +2307,8 @@ function ceUpdateSelInfo(){
   if(n>2){if(ceSelectedIdx<1)ceSelectedIdx=1;if(ceSelectedIdx>=n-1)ceSelectedIdx=n-2;}
   const el=document.getElementById('ceSelInfo');
   if(el)el.textContent=`Trade #${ceSelectedIdx}  •  val: ${Math.round(cePts[ceSelectedIdx]||0)}`;
+  const ctr=document.getElementById('ceDpadCtr');
+  if(ctr)ctr.textContent=`#${ceSelectedIdx}`;
   ceDraw();
 }
 function ceSelectLeft(){
@@ -2332,11 +2344,22 @@ function ceStopHold(){
 }
 
 function ceSmoothAll(){
-  // gaussian smooth
   const n=cePts.length;
   const s=[...cePts];
-  for(let i=1;i<n-1;i++)cePts[i]=Math.round((s[i-1]+s[i]*2+s[i+1])/4);
+  for(let i=1;i<n-1;i++)cePts[i]=Math.round(s[i]*0.85+((s[i-1]+s[i+1])/2)*0.15);
   ceDraw();toast('Kurva dihaluskan');
+}
+function ceRandomMove(){
+  const n=cePts.length;
+  const mn=Math.min(...cePts),mx=Math.max(...cePts);
+  const maxStep=Math.max(1,Math.round((mx-mn)*0.025));
+  for(let i=1;i<n-1;i++){
+    const r=Math.random();
+    if(r<0.2)continue; // 20% stable
+    const dir=Math.random()<0.5?1:-1;
+    cePts[i]=Math.round(cePts[i]+dir*Math.ceil(Math.random()*maxStep));
+  }
+  ceDraw();toast('Titik digerak acak');
 }
 function ceFlip(){
   const mn=Math.min(...cePts),mx=Math.max(...cePts);
@@ -2584,6 +2607,7 @@ function renderLST(){
       <div class="ce-info" id="lstCeInfo">Seret tengah kurva — awal & akhir terkunci</div>
       <div class="ce-toolbar">
         <button class="btn sm" onclick="lstSmoothCurve()">〰 Perhalus</button>
+        <button class="btn sm" onclick="lstRandomMove()">&#127922; Random</button>
         <button class="btn sm" onclick="lstFlipCurve()">↕ Balik</button>
       </div>
       <div class="zoom-row">
@@ -2757,9 +2781,23 @@ function lstSetupCanvas(){
 function lstSmoothCurve(){
   const n=lst_pts.length,s=[...lst_pts];
   const first=lst_pts[0],last=lst_pts[n-1];
-  for(let i=1;i<n-1;i++)lst_pts[i]=Math.round((s[i-1]+s[i]*2+s[i+1])/4);
+  for(let i=1;i<n-1;i++)lst_pts[i]=Math.round(s[i]*0.85+((s[i-1]+s[i+1])/2)*0.15);
   lst_pts[0]=first;lst_pts[n-1]=last;
   lstCeDraw();toast('Curve dihaluskan');
+}
+function lstRandomMove(){
+  const n=lst_pts.length;
+  const first=lst_pts[0],last=lst_pts[n-1];
+  const mn=Math.min(...lst_pts),mx=Math.max(...lst_pts);
+  const maxStep=Math.max(1,Math.round((mx-mn)*0.025));
+  for(let i=1;i<n-1;i++){
+    const r=Math.random();
+    if(r<0.2)continue;
+    const dir=Math.random()<0.5?1:-1;
+    lst_pts[i]=Math.round(lst_pts[i]+dir*Math.ceil(Math.random()*maxStep));
+  }
+  lst_pts[0]=first;lst_pts[n-1]=last;
+  lstCeDraw();toast('Curve digerak acak');
 }
 function lstFlipCurve(){
   const mn=Math.min(...lst_pts),mx=Math.max(...lst_pts);
