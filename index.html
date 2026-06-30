@@ -639,6 +639,11 @@ const SCR_META={
 };
 function go(screen){
   curScreen=screen;
+  // stop hold-repeat if navigating away from curve editor
+  ceStopHold();
+  // reset overflow in case any screen locked it
+  document.body.style.overflow='';
+  document.documentElement.style.overflow='';
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
   document.getElementById('screen-'+screen).classList.add('active');
   const m=SCR_META[screen];
@@ -1079,6 +1084,8 @@ async function downloadAll(){
 }
 async function renderSheetToPNG(innerHTML,fname){
   toast('Menyiapkan gambar...');
+  // yield to browser so it can finish rendering/scrolling before blocking canvas op
+  await new Promise(r=>setTimeout(r,80));
   // offscreen container styled like app; lebih lebar bila konten grid
   const wide=/id="allSheets"|class="jgrid"/.test(innerHTML);
   const holder=document.createElement('div');
@@ -1952,6 +1959,8 @@ let ceDragging=false, ceDragIdx=-1;
 let cePinching=false, cePinchDist0=1, cePinchZoom0=1;
 let ceCanvas=null, ceCtx=null;
 let ceAnimFrame=null;
+let ceSelectedIdx=1; // currently selected point for arrow nav (0 and n-1 are locked)
+let ceHoldTimer=null;
 
 function renderCurveEditor(){
   const s=document.getElementById('screen-curve');
@@ -1993,7 +2002,19 @@ function renderCurveEditor(){
       <button class="zoom-btn" onclick="ceZoomOut()">−</button>
       <span id="ceZoomLabel">${Math.round(ceZoom*100)}%</span>
     </div>
-    <div class="ce-info" id="ceInfo">Sentuh & seret kurva — titik awal & akhir terkunci, tengah bebas seperti tali</div>
+    <div class="ce-info" id="ceInfo">Seret kurva — awal & akhir terkunci | gunakan tombol ↑↓←→ untuk presisi</div>
+    <div style="background:var(--card);border:1px solid var(--violet-dim);border-radius:10px;padding:10px;margin:8px 0">
+      <div style="font-size:10px;color:var(--txt-faint);margin-bottom:8px;text-align:center;letter-spacing:.04em">NAVIGASI TITIK — PRESISI TANPA GAUSSIAN</div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:8px">
+        <button class="btn sm" id="ceBtnLeft" style="min-width:44px;min-height:44px;font-size:20px;padding:0;touch-action:manipulation">←</button>
+        <div id="ceSelInfo" style="font-family:var(--mono);font-size:10px;min-width:110px;text-align:center;color:#ffd600;font-weight:700">Trade #1</div>
+        <button class="btn sm" id="ceBtnRight" style="min-width:44px;min-height:44px;font-size:20px;padding:0;touch-action:manipulation">→</button>
+      </div>
+      <div style="display:flex;justify-content:center;gap:10px">
+        <button class="btn sm" id="ceBtnUp" style="min-width:44px;min-height:44px;font-size:20px;padding:0;touch-action:manipulation">↑</button>
+        <button class="btn sm" id="ceBtnDown" style="min-width:44px;min-height:44px;font-size:20px;padding:0;touch-action:manipulation">↓</button>
+      </div>
+    </div>
     <div class="ce-toolbar">
       <button class="btn sm" onclick="ceSmoothAll()">〰 Haluskan</button>
       <button class="btn sm" onclick="ceFlip()">↕ Balik</button>
@@ -2021,6 +2042,18 @@ function renderCurveEditor(){
   ceCanvas.addEventListener('mousemove',ceMouseMove);
   ceCanvas.addEventListener('mouseup',ceMouseUp);
   window.addEventListener('resize',resizeCeCanvas);
+  // Arrow nav buttons — press-and-hold repeats
+  function _ceBindBtn(id,action){
+    const el=document.getElementById(id);if(!el)return;
+    el.addEventListener('pointerdown',e=>{e.preventDefault();ceStartHold(action);},{passive:false});
+  }
+  _ceBindBtn('ceBtnLeft',ceSelectLeft);
+  _ceBindBtn('ceBtnRight',ceSelectRight);
+  _ceBindBtn('ceBtnUp',ceNudgeUp);
+  _ceBindBtn('ceBtnDown',ceNudgeDown);
+  window.addEventListener('pointerup',ceStopHold,{once:false});
+  window.addEventListener('pointercancel',ceStopHold,{once:false});
+  ceUpdateSelInfo();
 }
 
 function resizeCeCanvas(){
@@ -2093,22 +2126,31 @@ function ceDraw(){
   ctx.save();ctx.filter='blur(4px)';ctx.globalAlpha=0.5;
   ctx.beginPath();coords.forEach(([x,y],i)=>i===0?ctx.moveTo(x,y):ctx.lineTo(x,y));
   ctx.stroke();ctx.restore();
-  // dots — endpoint terkunci tampil berbeda
+  // clamp ceSelectedIdx to valid range
+  if(n>2){if(ceSelectedIdx<1)ceSelectedIdx=1;if(ceSelectedIdx>=n-1)ceSelectedIdx=n-2;}
+  // dots — endpoint terkunci tampil berbeda, selected = kuning
   coords.forEach(([x,y],i)=>{
     const isLocked=(i===0||i===n-1);
     const isActive=(i===ceDragIdx);
+    const isSelected=(i===ceSelectedIdx&&!isLocked);
+    const r=isLocked?5:isActive?6:isSelected?5:3;
     ctx.beginPath();
-    ctx.arc(x,y,isLocked?5:isActive?6:3,0,Math.PI*2);
-    ctx.fillStyle=isLocked?'#fff':isActive?'#fff':th.c;
+    ctx.arc(x,y,r,0,Math.PI*2);
+    ctx.fillStyle=isLocked?'#fff':isActive?'#fff':isSelected?'#ffd600':th.c;
     ctx.fill();
     if(isLocked){
       ctx.strokeStyle=th.c;ctx.lineWidth=2;ctx.stroke();
-      // label kunci
       ctx.font='bold 9px monospace';
       ctx.fillStyle='rgba(255,255,255,.7)';
       ctx.fillText(i===0?'▶':'◀',x+(i===0?7:-14),y+4);
     }
-    if(isActive&&!isLocked){ctx.strokeStyle=th.c;ctx.lineWidth=2;ctx.stroke();}
+    if(isSelected){
+      ctx.strokeStyle='#ffd600';ctx.lineWidth=2.5;ctx.stroke();
+      // value label above selected point
+      ctx.font='bold 10px monospace';ctx.fillStyle='#ffd600';
+      ctx.fillText(Math.round(cePts[i]),x-14,y-9);
+    }
+    if(isActive&&!isLocked&&!isSelected){ctx.strokeStyle=th.c;ctx.lineWidth=2;ctx.stroke();}
   });
   // value labels at ends
   ctx.font='bold 10px monospace';ctx.fillStyle='rgba(255,255,255,.6)';
@@ -2125,7 +2167,7 @@ function ceApplyDrag(idx,newVal){
   const n=cePts.length;
   // kunci titik awal & akhir
   if(idx===0||idx===n-1)return;
-  const sigma=n*0.25;
+  const sigma=2.5; // radius kecil — hanya 2-3 titik tetangga yang tertarik
   const savedFirst=cePts[0],savedLast=cePts[n-1];
   cePts.forEach((_,i)=>{
     if(i===0||i===n-1)return; // skip endpoints
@@ -2184,7 +2226,11 @@ function ceTouchMove(e){
   ceApplyDrag(ceDragIdx,newVal);
   ceDraw();
 }
-function ceTouchEnd(e){ceDragging=false;cePinching=false;ceDragIdx=-1;ceDraw();}
+function ceTouchEnd(e){
+  const n=cePts.length;
+  if(ceDragIdx>=1&&ceDragIdx<=n-2)ceSelectedIdx=ceDragIdx;
+  ceDragging=false;cePinching=false;ceDragIdx=-1;ceUpdateSelInfo();
+}
 function ceMouseDown(e){
   const {x,y}=ceGetPos(e,ceCanvas);
   ceDragIdx=ceXYToPtIdx(x,y,ceCanvas.width,ceCanvas.height);
@@ -2196,20 +2242,63 @@ function ceMouseMove(e){
   ceApplyDrag(ceDragIdx,ceYToVal(y,ceCanvas.width,ceCanvas.height));
   ceDraw();
 }
-function ceMouseUp(){ceDragging=false;ceDragIdx=-1;ceDraw();}
+function ceMouseUp(){
+  const n=cePts.length;
+  if(ceDragIdx>=1&&ceDragIdx<=n-2)ceSelectedIdx=ceDragIdx;
+  ceDragging=false;ceDragIdx=-1;ceUpdateSelInfo();
+}
 function ceZoomIn(){ceZoom=Math.min(5,ceZoom*1.3);document.getElementById('ceZoomLabel').textContent=Math.round(ceZoom*100)+'%';ceDraw();}
 function ceZoomOut(){ceZoom=Math.max(0.3,ceZoom/1.3);document.getElementById('ceZoomLabel').textContent=Math.round(ceZoom*100)+'%';ceDraw();}
 function ceReset(){
   const ai=state.ais.find(a=>a.id===ceAiId);if(!ai)return;
   cePts=ai.equity.length>=2?[...ai.equity]:Array.from({length:ai.trades.length||20},(_,i)=>Math.round(1000+(i/(ai.trades.length||20))*500));
-  cePts.aiId=ceAiId;ceZoom=1;ceOffsetY=0;
-  // sync fix inputs
+  cePts.aiId=ceAiId;ceZoom=1;ceOffsetY=0;ceSelectedIdx=1;
   const fs=document.getElementById('ceFixStart');
   const fe=document.getElementById('ceFixEnd');
   if(fs)fs.value=cePts[0];
   if(fe)fe.value=cePts[cePts.length-1];
-  ceDraw();toast('Direset ke data jurnal');
+  ceUpdateSelInfo();toast('Direset ke data jurnal');
 }
+// ---- Arrow nav: presisi tanpa gaussian pull ----
+function ceUpdateSelInfo(){
+  const n=cePts.length;
+  if(n>2){if(ceSelectedIdx<1)ceSelectedIdx=1;if(ceSelectedIdx>=n-1)ceSelectedIdx=n-2;}
+  const el=document.getElementById('ceSelInfo');
+  if(el)el.textContent=`Trade #${ceSelectedIdx}  •  val: ${Math.round(cePts[ceSelectedIdx]||0)}`;
+  ceDraw();
+}
+function ceSelectLeft(){
+  if(ceSelectedIdx>1)ceSelectedIdx--;
+  ceUpdateSelInfo();
+}
+function ceSelectRight(){
+  const n=cePts.length;
+  if(ceSelectedIdx<n-2)ceSelectedIdx++;
+  ceUpdateSelInfo();
+}
+function ceNudgeUp(){
+  const n=cePts.length;
+  if(ceSelectedIdx<1||ceSelectedIdx>=n-1)return;
+  const step=Math.max(1,Math.round((Math.max(...cePts)-Math.min(...cePts))/100))||1;
+  cePts[ceSelectedIdx]=Math.round(cePts[ceSelectedIdx]+step);
+  ceUpdateSelInfo();
+}
+function ceNudgeDown(){
+  const n=cePts.length;
+  if(ceSelectedIdx<1||ceSelectedIdx>=n-1)return;
+  const step=Math.max(1,Math.round((Math.max(...cePts)-Math.min(...cePts))/100))||1;
+  cePts[ceSelectedIdx]=Math.round(cePts[ceSelectedIdx]-step);
+  ceUpdateSelInfo();
+}
+function ceStartHold(action){
+  ceStopHold();
+  action();
+  ceHoldTimer=setInterval(action,95);
+}
+function ceStopHold(){
+  if(ceHoldTimer){clearInterval(ceHoldTimer);ceHoldTimer=null;}
+}
+
 function ceSmoothAll(){
   // gaussian smooth
   const n=cePts.length;
@@ -2364,6 +2453,9 @@ let lstTradeIdx=0;
 let lstPhaseTimer=null;
 let lstStats={wins:0,loses:0,pnl:0};
 let _lstSkipFlag=false;
+let lstSelectedAiIds=[]; // multi-AI selection
+let lstCurrentAiQueue=[]; // queue of AI IDs to play in sequence
+let lstAllResults=[]; // [{ai,pnl,pct,wins,loses,trades,pts}]
 
 // LST curve editor state (terpisah dari ce* Curve Editor)
 let lst_pts=[];
@@ -2390,18 +2482,26 @@ function lstDefaultConfig(){
 function renderLST(){
   if(!lstCfg)lstCfg=lstDefaultConfig();
   if(!state.ais.find(a=>a.id===lstCfg.aiId))lstCfg.aiId=state.ais.length?state.ais[0].id:'';
+  // init selected AI IDs if empty
+  if(!lstSelectedAiIds.length&&lstCfg.aiId)lstSelectedAiIds=[lstCfg.aiId];
   const s=document.getElementById('screen-scan');
   const poolKeys=Object.keys(LST_POOLS);
-  const aiOpts=state.ais.map(a=>`<option value="${a.id}" ${a.id===lstCfg.aiId?'selected':''}>${esc(a.name)}</option>`).join('')||'<option value="">Belum ada AI</option>';
   const poolOpts=poolKeys.map(k=>`<option value="${k}" ${k===lstCfg.tickerPool?'selected':''}>${k}</option>`).join('');
+  const aiChkList=state.ais.length
+    ?state.ais.map(a=>`<label style="display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer">
+        <input type="checkbox" value="${a.id}" class="lst-ai-chk" ${lstSelectedAiIds.includes(a.id)?'checked':''} style="accent-color:var(--violet);width:16px;height:16px;flex-shrink:0">
+        <span style="font-size:13px">${esc(a.name)}</span>
+      </label>`).join('')+
+      (state.ais.length>1?`<button class="btn sm" style="margin-top:6px;font-size:11px" onclick="lstToggleAllAi()">✓ Pilih Semua / Batal Semua</button>`:'')
+    :'<div style="color:var(--txt-faint);font-size:12px">Belum ada AI</div>';
   s.innerHTML=`
     <div class="section-hd"><div><h2>Live Scan Theater</h2><div class="sub">Setup simulasi visual</div></div></div>
     <div class="settings-section">
       <h3>🎬 Konfigurasi Theater</h3>
       <label class="field-label">Ticker Pool</label>
       <select class="inp" id="lstPool">${poolOpts}</select>
-      <label class="field-label">Pilih AI</label>
-      <select class="inp" id="lstAi">${aiOpts}</select>
+      <label class="field-label">Pilih AI (bisa pilih beberapa)</label>
+      <div style="background:var(--card);border:1px solid var(--violet-dim);border-radius:10px;padding:8px;display:flex;flex-direction:column;gap:2px" id="lstAiChkList">${aiChkList}</div>
       <label class="field-label">Pemilik</label>
       <input class="inp" id="lstOwner" value="${esc(lstCfg.owner)}" placeholder="Nama pemilik...">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
@@ -2469,13 +2569,25 @@ function renderLST(){
 
 function lstReadForm(){
   lstCfg.tickerPool=document.getElementById('lstPool')?.value||lstCfg.tickerPool;
-  lstCfg.aiId=document.getElementById('lstAi')?.value||lstCfg.aiId;
+  // multi-AI: read checked checkboxes
+  const chks=[...document.querySelectorAll('.lst-ai-chk:checked')];
+  if(chks.length>0){
+    lstSelectedAiIds=chks.map(el=>el.value);
+    lstCfg.aiId=lstSelectedAiIds[0];
+  } else if(state.ais.length){
+    lstSelectedAiIds=[state.ais[0].id];lstCfg.aiId=lstSelectedAiIds[0];
+  }
   lstCfg.owner=document.getElementById('lstOwner')?.value||'';
   lstCfg.currency=document.getElementById('lstCurrency')?.value||'USD';
   lstCfg.actionDuration=parseInt(document.getElementById('lstDuration')?.value)||4;
   lstCfg.startEquity=parseFloat(document.getElementById('lstStart')?.value)||1000;
   lstCfg.endEquity=parseFloat(document.getElementById('lstEnd')?.value)||2000;
   lstCfg.totalTrades=Math.max(1,parseInt(document.getElementById('lstN')?.value)||20);
+}
+function lstToggleAllAi(){
+  const chks=document.querySelectorAll('.lst-ai-chk');
+  const allChecked=[...chks].every(c=>c.checked);
+  chks.forEach(c=>c.checked=!allChecked);
 }
 
 function lstInitCurve(){
@@ -2560,7 +2672,7 @@ function lstCeDraw(){
 function lstApplyDrag(idx,newVal){
   const n=lst_pts.length;
   if(idx===0||idx===n-1)return; // endpoints terkunci
-  const sigma=n*0.25;
+  const sigma=2.5; // radius kecil — hanya 2-3 titik tetangga yang tertarik
   const savedFirst=lst_pts[0],savedLast=lst_pts[n-1];
   const delta=newVal-lst_pts[idx];
   lst_pts.forEach((_,i)=>{
@@ -2649,13 +2761,30 @@ function lstGenTradesFromCurve(){
 /* ----- Theater: play / stop ----- */
 function lstPlay(){
   lstReadForm();
-  if(!lstCfg.aiId&&state.ais.length)lstCfg.aiId=state.ais[0].id;
-  if(lst_pts.length<2){toast('Generate curve dulu');return;}
-  // recalculate total trades to match curve
+  if(!lstSelectedAiIds.length&&state.ais.length)lstSelectedAiIds=[state.ais[0].id];
+  if(!lstSelectedAiIds.length){toast('Pilih minimal 1 AI');return;}
+  lstAllResults=[];
+  lstCurrentAiQueue=[...lstSelectedAiIds];
+  lstPlayNextAi();
+}
+
+function lstPlayNextAi(){
+  if(!lstCurrentAiQueue.length){lstShowReel();return;}
+  lstCfg.aiId=lstCurrentAiQueue.shift();
+  const ai=state.ais.find(a=>a.id===lstCfg.aiId);
+  // sync with AI's actual equity data for realism
+  if(ai&&ai.equity&&ai.equity.length>=2){
+    lst_pts=[...ai.equity];
+  }
+  if(lst_pts.length<2){
+    toast('AI '+(ai?.name||'')+" belum punya data equity. Generate curve dulu.");
+    if(lstCurrentAiQueue.length)setTimeout(lstPlayNextAi,400);
+    else lstShowReel();
+    return;
+  }
   lstCfg.totalTrades=lst_pts.length-1;
   lstTrades=lstGenTradesFromCurve();
   lstTradeIdx=0;lstStats={wins:0,loses:0,pnl:0};lstRunning=true;
-  const ai=state.ais.find(a=>a.id===lstCfg.aiId);
   const th=ai?themeOf(ai):{c:'#9d4dff',c2:'#ffffff'};
   const s=document.getElementById('screen-scan');
   s.innerHTML=lstBuildTheaterHTML(ai,th);
@@ -2716,7 +2845,29 @@ function lstStop(e){
 }
 
 function lstRunTrade(){
-  if(!lstRunning||lstTradeIdx>=lstTrades.length){lstShowReel();return;}
+  if(!lstRunning||lstTradeIdx>=lstTrades.length){
+    // record current AI results
+    const _ai=state.ais.find(a=>a.id===lstCfg.aiId);
+    const _pnl=lst_pts[lst_pts.length-1]-lst_pts[0];
+    const _pct=lst_pts[0]!==0?(_pnl/Math.abs(lst_pts[0]))*100:0;
+    lstAllResults.push({ai:_ai,pnl:_pnl,pct:_pct,wins:lstStats.wins,loses:lstStats.loses,trades:lstTrades.length,pts:[...lst_pts]});
+    if(lstCurrentAiQueue&&lstCurrentAiQueue.length>0){
+      // brief inter-AI transition card
+      const th=_ai?themeOf(_ai):{c:'#9d4dff'};
+      const s=document.getElementById('screen-scan');
+      s.innerHTML=`<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:50px 24px;min-height:320px;text-align:center">
+        <div style="font-size:12px;color:var(--txt-faint);margin-bottom:6px;letter-spacing:.06em">SELESAI</div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:20px;color:${th.c};margin-bottom:10px">${esc(_ai?.name||'AI')}</div>
+        <div style="font-size:32px;font-weight:700;color:${_pnl>=0?th.c:'var(--loss)'};">${_pnl>0?'+':''}${Math.round(_pnl)} ${lstCfg.currency}</div>
+        <div style="margin-top:6px;font-size:12px;color:var(--txt-dim)">Win: ${lstStats.wins} / Lose: ${lstStats.loses}</div>
+        <div style="font-size:11px;color:var(--txt-faint);margin-top:20px">⏳ Melanjutkan ke AI berikutnya... (${lstCurrentAiQueue.length} tersisa)</div>
+      </div>`;
+      lstPhaseTimer=setTimeout(lstPlayNextAi,1800);
+    } else {
+      lstShowReel();
+    }
+    return;
+  }
   _lstSkipFlag=false;
   const tr=lstTrades[lstTradeIdx];
   const dur=(lstCfg.actionDuration||4)*1000;
@@ -2859,97 +3010,150 @@ function lstPhase_Result(tr,dur,done){
 function lstShowReel(){
   lstRunning=false;
   sndBattleEnd();
-  const ai=state.ais.find(a=>a.id===lstCfg.aiId);
-  const th=ai?themeOf(ai):{c:'#9d4dff',c2:'#ffffff'};
-  const totalPnl=lst_pts[lst_pts.length-1]-lst_pts[0];
-  const totalPct=lst_pts[0]!==0?(totalPnl/Math.abs(lst_pts[0]))*100:0;
-  const wr=lstTrades.length?Math.round(lstStats.wins/lstTrades.length*100):0;
-  const av=ai&&ai.photo?`<img src="${ai.photo}" style="width:100%;height:100%;object-fit:cover">`
-    :`<span style="font-family:var(--mono);font-weight:700;font-size:18px;color:${th.c}">${esc(initials(ai?.name||'AI'))}</span>`;
   const s=document.getElementById('screen-scan');
-  s.innerHTML=`
-    <div class="section-hd"><div><h2>Highlight Reel</h2><div class="sub">Hasil akhir theater</div></div></div>
-    <div style="background:var(--card2);border:1px solid var(--violet-dim);border-radius:14px;padding:14px;margin-bottom:12px;box-shadow:0 0 30px var(--violet-glow)">
-      <div class="sheet-hd">
-        <div class="sheet-av" style="width:50px;height:50px;border-color:${th.c};box-shadow:0 0 18px ${th.c}66">${av}</div>
-        <div>
-          <div class="sheet-name" style="color:${th.c}">${esc(ai?.name||'AI')}</div>
-          <div class="sheet-status">${lstCfg.owner?'Pemilik: '+esc(lstCfg.owner):esc(ai?.status||'')}</div>
+  if(lstAllResults.length>1){
+    // Multi-AI combined reel
+    const cards=lstAllResults.map((r,ri)=>{
+      const th=r.ai?themeOf(r.ai):{c:'#9d4dff',c2:'#ffffff'};
+      const av=r.ai&&r.ai.photo?`<img src="${r.ai.photo}" style="width:100%;height:100%;object-fit:cover">`
+        :`<span style="font-family:var(--mono);font-weight:700;font-size:14px;color:${th.c}">${esc(initials(r.ai?.name||'AI'))}</span>`;
+      const wr=r.trades?Math.round(r.wins/r.trades*100):0;
+      return`<div style="background:var(--card2);border:1.5px solid ${th.c}44;border-radius:12px;padding:12px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+          <div style="width:40px;height:40px;border-radius:10px;border:2px solid ${th.c};overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--bg-deep);flex-shrink:0">${av}</div>
+          <div style="flex:1;min-width:0">
+            <div style="font-family:var(--mono);font-weight:700;font-size:14px;color:${th.c};overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.ai?.name||'AI')}</div>
+            <div style="font-size:10px;color:var(--txt-dim)">Win: ${r.wins} / Lose: ${r.loses} | WR: ${wr}%</div>
+          </div>
+          <div id="lstReelPnl${ri}" style="font-family:var(--mono);font-weight:700;font-size:16px;color:${r.pnl>=0?th.c:'var(--loss)'};white-space:nowrap">${r.pnl>0?'+':''}0 ${lstCfg.currency}</div>
         </div>
+        <div style="height:64px">${equitySVG(r.pts,340,64,th.c,th.c2||'#fff')}</div>
+      </div>`;
+    }).join('');
+    s.innerHTML=`
+      <div class="section-hd"><div><h2>Highlight Reel</h2><div class="sub">${lstAllResults.length} AI selesai</div></div></div>
+      ${cards}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+        <button class="btn full" onclick="lstDownloadReel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:14px;height:14px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Download</button>
+        <button class="btn primary full" onclick="go('home')">✓ Selesai</button>
+      </div>`;
+    // animated counters for all AIs
+    lstAllResults.forEach((r,ri)=>{
+      let cur=0;const target=r.pnl,sign=target>=0?1:-1;
+      const step=Math.max(1,Math.abs(target)/60);
+      const el=document.getElementById('lstReelPnl'+ri);
+      const th=r.ai?themeOf(r.ai):{c:'#9d4dff'};
+      const ctr=setInterval(()=>{
+        cur+=sign*step;
+        if((sign>0&&cur>=target)||(sign<0&&cur<=target)){cur=target;clearInterval(ctr);}
+        if(el)el.textContent=(cur>0?'+':'')+Math.round(cur)+' '+lstCfg.currency;
+      },16);
+    });
+  } else {
+    // Single AI reel (existing behavior)
+    const ai=state.ais.find(a=>a.id===lstCfg.aiId);
+    const th=ai?themeOf(ai):{c:'#9d4dff',c2:'#ffffff'};
+    const r=lstAllResults[0]||{pnl:lst_pts[lst_pts.length-1]-lst_pts[0],pct:0,wins:lstStats.wins,loses:lstStats.loses,trades:lstTrades.length,pts:lst_pts};
+    const totalPnl=r.pnl;
+    const totalPct=r.pct!=null?r.pct:(r.pts[0]!==0?(totalPnl/Math.abs(r.pts[0]))*100:0);
+    const wr=r.trades?Math.round(r.wins/r.trades*100):0;
+    const av=ai&&ai.photo?`<img src="${ai.photo}" style="width:100%;height:100%;object-fit:cover">`
+      :`<span style="font-family:var(--mono);font-weight:700;font-size:18px;color:${th.c}">${esc(initials(ai?.name||'AI'))}</span>`;
+    s.innerHTML=`
+      <div class="section-hd"><div><h2>Highlight Reel</h2><div class="sub">Hasil akhir theater</div></div></div>
+      <div style="background:var(--card2);border:1px solid var(--violet-dim);border-radius:14px;padding:14px;margin-bottom:12px;box-shadow:0 0 30px var(--violet-glow)">
+        <div class="sheet-hd">
+          <div class="sheet-av" style="width:50px;height:50px;border-color:${th.c};box-shadow:0 0 18px ${th.c}66">${av}</div>
+          <div>
+            <div class="sheet-name" style="color:${th.c}">${esc(ai?.name||'AI')}</div>
+            <div class="sheet-status">${lstCfg.owner?'Pemilik: '+esc(lstCfg.owner):esc(ai?.status||'')}</div>
+          </div>
+        </div>
+        <div class="sheet-grid" style="margin-bottom:12px">
+          <div class="sheet-stat"><label>Win Rate</label><div class="v" style="color:${th.c}">${wr}%</div></div>
+          <div class="sheet-stat"><label>Total Trade</label><div class="v">${r.trades}</div></div>
+          <div class="sheet-stat"><label>Win</label><div class="v" style="color:var(--profit)">${r.wins}</div></div>
+          <div class="sheet-stat"><label>Lose</label><div class="v" style="color:var(--loss)">${r.loses}</div></div>
+          <div class="sheet-stat"><label>Return</label><div class="v" style="color:${totalPnl>=0?th.c:'var(--loss)'}">${fmtPct_id(totalPct)}</div></div>
+          <div class="sheet-stat"><label>Total PnL</label><div class="v" id="lstReelPnl" style="color:${totalPnl>=0?th.c:'var(--loss)'}">0</div></div>
+        </div>
+        <label class="sheet-eqlabel">Equity Curve</label>
+        <div style="height:140px">${equitySVG(r.pts,360,140,th.c,th.c2||'#fff')}</div>
+        <div class="sheet-eqval" style="color:${totalPnl>=0?th.c:'var(--loss)'}">
+          ${totalPnl>0?'+':''}${Math.round(totalPnl)} ${lstCfg.currency}
+          <span style="font-size:13px;opacity:.7">(${fmtPct_id(totalPct)})</span>
+        </div>
+        <div class="sheet-wm">${getWM()}</div>
       </div>
-      <div class="sheet-grid" style="margin-bottom:12px">
-        <div class="sheet-stat"><label>Win Rate</label><div class="v" style="color:${th.c}">${wr}%</div></div>
-        <div class="sheet-stat"><label>Total Trade</label><div class="v">${lstTrades.length}</div></div>
-        <div class="sheet-stat"><label>Win</label><div class="v" style="color:var(--profit)">${lstStats.wins}</div></div>
-        <div class="sheet-stat"><label>Lose</label><div class="v" style="color:var(--loss)">${lstStats.loses}</div></div>
-        <div class="sheet-stat"><label>Return</label><div class="v" style="color:${totalPnl>=0?th.c:'var(--loss)'}">${fmtPct_id(totalPct)}</div></div>
-        <div class="sheet-stat"><label>Total PnL</label><div class="v" id="lstReelPnl" style="color:${totalPnl>=0?th.c:'var(--loss)'}">0</div></div>
-      </div>
-      <label class="sheet-eqlabel">Equity Curve</label>
-      <div style="height:140px">${equitySVG(lst_pts,360,140,th.c,th.c2||'#fff')}</div>
-      <div class="sheet-eqval" style="color:${totalPnl>=0?th.c:'var(--loss)'}">
-        ${totalPnl>0?'+':''}${Math.round(totalPnl)} ${lstCfg.currency}
-        <span style="font-size:13px;opacity:.7">(${fmtPct_id(totalPct)})</span>
-      </div>
-      <div class="sheet-wm">${getWM()}</div>
-    </div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn full" onclick="lstDownloadReel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Download</button>
-      <button class="btn full" onclick="lstReplay()">↺ Ulangi</button>
-      <button class="btn primary full" onclick="go('home')">✓ Selesai</button>
-    </div>`;
-  // animated counter
-  let cur=0;const target=totalPnl,sign=target>=0?1:-1;
-  const step=Math.max(1,Math.abs(target)/60);
-  const el=document.getElementById('lstReelPnl');
-  const ctr=setInterval(()=>{
-    cur+=sign*step;
-    if((sign>0&&cur>=target)||(sign<0&&cur<=target)){cur=target;clearInterval(ctr);}
-    if(el)el.textContent=(cur>0?'+':'')+Math.round(cur)+' '+lstCfg.currency;
-  },16);
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn full" onclick="lstDownloadReel()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:15px;height:15px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg> Download</button>
+        <button class="btn full" onclick="lstReplay()">↺ Ulangi</button>
+        <button class="btn primary full" onclick="go('home')">✓ Selesai</button>
+      </div>`;
+    // animated counter
+    let cur=0;const target=totalPnl,sign=target>=0?1:-1;
+    const step=Math.max(1,Math.abs(target)/60);
+    const el=document.getElementById('lstReelPnl');
+    const ctr=setInterval(()=>{
+      cur+=sign*step;
+      if((sign>0&&cur>=target)||(sign<0&&cur<=target)){cur=target;clearInterval(ctr);}
+      if(el)el.textContent=(cur>0?'+':'')+Math.round(cur)+' '+lstCfg.currency;
+    },16);
+  }
 }
 
 function lstReplay(){
-  lstTradeIdx=0;lstStats={wins:0,loses:0,pnl:0};lstRunning=true;
-  lstTrades=lstGenTradesFromCurve();
-  const ai=state.ais.find(a=>a.id===lstCfg.aiId);
-  const th=ai?themeOf(ai):{c:'#9d4dff',c2:'#ffffff'};
-  const s=document.getElementById('screen-scan');
-  s.innerHTML=lstBuildTheaterHTML(ai,th);
-  document.getElementById('lstTheater').addEventListener('click',lstSkipTrade);
-  lstRunTrade();
+  lstAllResults=[];
+  lstCurrentAiQueue=[...(lstSelectedAiIds.length?lstSelectedAiIds:[lstCfg.aiId])];
+  lstPlayNextAi();
 }
 
 async function lstDownloadReel(){
-  const ai=state.ais.find(a=>a.id===lstCfg.aiId);
-  const th=ai?themeOf(ai):{c:'#9d4dff',c2:'#ffffff'};
-  const totalPnl=lst_pts[lst_pts.length-1]-lst_pts[0];
-  const totalPct=lst_pts[0]!==0?(totalPnl/Math.abs(lst_pts[0]))*100:0;
-  const wr=lstTrades.length?Math.round(lstStats.wins/lstTrades.length*100):0;
-  const av=ai&&ai.photo?`<img src="${ai.photo}" style="width:100%;height:100%;object-fit:cover">`
-    :`<span style="font-family:var(--mono);font-weight:700;font-size:18px;color:${th.c}">${esc(initials(ai?.name||'AI'))}</span>`;
-  const html=`
-    <div style="padding:16px;background:#08070d;border-radius:14px;width:380px">
+  let html='';let fname='lst-reel';
+  if(lstAllResults.length>1){
+    // multi-AI combined download
+    const rows=lstAllResults.map(r=>{
+      const th=r.ai?themeOf(r.ai):{c:'#9d4dff',c2:'#ffffff'};
+      const av=r.ai&&r.ai.photo?`<img src="${r.ai.photo}" style="width:100%;height:100%;object-fit:cover">`
+        :`<span style="font-family:var(--mono);font-weight:700;font-size:14px;color:${th.c}">${esc(initials(r.ai?.name||'AI'))}</span>`;
+      const wr=r.trades?Math.round(r.wins/r.trades*100):0;
+      return`<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #2a2438">
+        <div style="width:36px;height:36px;border-radius:8px;border:2px solid ${th.c};overflow:hidden;display:flex;align-items:center;justify-content:center;background:#04030a;flex-shrink:0">${av}</div>
+        <div style="flex:1"><div style="font-family:var(--mono);font-weight:700;font-size:13px;color:${th.c}">${esc(r.ai?.name||'AI')}</div><div style="font-size:9px;color:#9893ab">WR:${wr}%  W:${r.wins} L:${r.loses}</div></div>
+        <div style="font-family:var(--mono);font-weight:700;font-size:15px;color:${r.pnl>=0?th.c:'#ef5350'}">${r.pnl>0?'+':''}${Math.round(r.pnl)} ${lstCfg.currency}</div>
+      </div>
+      <div style="height:52px;margin-bottom:4px">${equitySVG(r.pts,348,52,th.c,th.c2||'#fff')}</div>`;
+    }).join('');
+    html=`<div style="padding:16px;background:#08070d;border-radius:14px;width:380px"><div style="font-family:var(--mono);font-weight:700;font-size:15px;color:#9d4dff;margin-bottom:12px">Theater — ${lstAllResults.length} AI</div>${rows}<div style="text-align:center;font-size:10px;color:#5c5770;margin-top:10px;font-family:var(--mono)">${getWM()}</div></div>`;
+    fname='lst-reel-multi';
+  } else {
+    const ai=state.ais.find(a=>a.id===lstCfg.aiId);
+    const th=ai?themeOf(ai):{c:'#9d4dff',c2:'#ffffff'};
+    const r=lstAllResults[0]||{pnl:lst_pts[lst_pts.length-1]-lst_pts[0],pct:0,wins:lstStats.wins,loses:lstStats.loses,trades:lstTrades.length,pts:lst_pts};
+    const totalPnl=r.pnl;const totalPct=r.pct!=null?r.pct:0;const wr=r.trades?Math.round(r.wins/r.trades*100):0;
+    const av=ai&&ai.photo?`<img src="${ai.photo}" style="width:100%;height:100%;object-fit:cover">`
+      :`<span style="font-family:var(--mono);font-weight:700;font-size:18px;color:${th.c}">${esc(initials(ai?.name||'AI'))}</span>`;
+    html=`<div style="padding:16px;background:#08070d;border-radius:14px;width:380px">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
         <div style="width:50px;height:50px;border-radius:13px;border:2px solid ${th.c};box-shadow:0 0 18px ${th.c}66;display:flex;align-items:center;justify-content:center;background:#040308;overflow:hidden">${av}</div>
-        <div>
-          <div style="font-family:var(--mono);font-weight:700;font-size:17px;color:${th.c}">${esc(ai?.name||'AI')}</div>
-          <div style="font-size:10px;color:#9893ab">${lstCfg.owner?'Pemilik: '+esc(lstCfg.owner):esc(ai?.status||'')}</div>
-        </div>
+        <div><div style="font-family:var(--mono);font-weight:700;font-size:17px;color:${th.c}">${esc(ai?.name||'AI')}</div>
+        <div style="font-size:10px;color:#9893ab">${lstCfg.owner?'Pemilik: '+esc(lstCfg.owner):esc(ai?.status||'')}</div></div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);margin-bottom:14px;background:#040308;border:1px solid #2a2438;border-radius:10px;overflow:hidden">
         <div style="padding:10px 8px;text-align:center;border-right:1px solid #2a2438;border-bottom:1px solid #2a2438"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Win Rate</div><div style="font-family:var(--mono);font-weight:700;font-size:13px;color:${th.c}">${wr}%</div></div>
-        <div style="padding:10px 8px;text-align:center;border-right:1px solid #2a2438;border-bottom:1px solid #2a2438"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Win</div><div style="font-family:var(--mono);font-weight:700;font-size:13px;color:#26c6a8">${lstStats.wins}</div></div>
-        <div style="padding:10px 8px;text-align:center;border-bottom:1px solid #2a2438"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Lose</div><div style="font-family:var(--mono);font-weight:700;font-size:13px;color:#ef5350">${lstStats.loses}</div></div>
-        <div style="padding:10px 8px;text-align:center;border-right:1px solid #2a2438"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Total Trade</div><div style="font-family:var(--mono);font-weight:700;font-size:13px">${lstTrades.length}</div></div>
+        <div style="padding:10px 8px;text-align:center;border-right:1px solid #2a2438;border-bottom:1px solid #2a2438"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Win</div><div style="font-family:var(--mono);font-weight:700;font-size:13px;color:#26c6a8">${r.wins}</div></div>
+        <div style="padding:10px 8px;text-align:center;border-bottom:1px solid #2a2438"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Lose</div><div style="font-family:var(--mono);font-weight:700;font-size:13px;color:#ef5350">${r.loses}</div></div>
+        <div style="padding:10px 8px;text-align:center;border-right:1px solid #2a2438"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Total Trade</div><div style="font-family:var(--mono);font-weight:700;font-size:13px">${r.trades}</div></div>
         <div style="padding:10px 8px;text-align:center;border-right:1px solid #2a2438"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Return</div><div style="font-family:var(--mono);font-weight:700;font-size:13px;color:${totalPnl>=0?th.c:'#ef5350'}">${fmtPct_id(totalPct)}</div></div>
         <div style="padding:10px 8px;text-align:center"><div style="font-size:8.5px;color:#9893ab;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Total PnL</div><div style="font-family:var(--mono);font-weight:700;font-size:13px;color:${totalPnl>=0?th.c:'#ef5350'}">${totalPnl>0?'+':''}${Math.round(totalPnl)} ${lstCfg.currency}</div></div>
       </div>
-      <div style="height:140px">${equitySVG(lst_pts,380,140,th.c,th.c2||'#fff')}</div>
+      <div style="height:140px">${equitySVG(r.pts,380,140,th.c,th.c2||'#fff')}</div>
       <div style="font-family:var(--mono);font-weight:700;font-size:20px;text-align:center;margin-top:10px;color:${totalPnl>=0?th.c:'#ef5350'}">${totalPnl>0?'+':''}${Math.round(totalPnl)} ${lstCfg.currency} <span style="font-size:13px;opacity:.7">(${fmtPct_id(totalPct)})</span></div>
       <div style="text-align:center;font-size:10px;color:#5c5770;margin-top:10px;font-family:var(--mono)">${getWM()}</div>
     </div>`;
-  await renderSheetToPNG(html,'lst-reel-'+(ai?.name||'AI').replace(/\s+/g,'_'));
+    fname='lst-reel-'+(ai?.name||'AI').replace(/\s+/g,'_');
+  }
+  await renderSheetToPNG(html,fname);
 }
 
 /* ============================================================
