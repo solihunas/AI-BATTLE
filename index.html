@@ -944,23 +944,18 @@ function launchPlayAll(){
   if(document.getElementById('pXAU')?.checked) cats.push('XAU');
   if(document.getElementById('pCRY')?.checked) cats.push('CRYPTO');
   if(!cats.length) cats.push('CRYPTO');
-  // build battleCfg dari data roster
+  // build battleCfg dari data roster (equity nyata masing-masing AI)
   battleCfg.participantIds=state.ais.map(a=>a.id);
   battleCfg.winnerId='';
   battleCfg.durationSec=dur;
   battleCfg.pairCats=cats;
   state.ais.forEach(a=>{
     const inp=document.getElementById('pcfg_'+a.id);
-    const n=parseInt(inp?.value)||Math.min(a.trades.length||10,20);
-    battleCfg.tradesPerAI[a.id]=Math.max(1,n);
-    // gunakan equity existing (modal & hasil dari data jurnal)
-    battleCfg.startEquity[a.id]=a.equity.length>0?a.equity[0]:0;
-    battleCfg.endEquity[a.id]=a.equity.length>0?a.equity[a.equity.length-1]:500;
+    const totalTrades=Math.max(0,(a.equity||[]).length-1);
+    const n=parseInt(inp?.value)||Math.min(totalTrades,20);
+    battleCfg.tradesPerAI[a.id]=Math.max(1,Math.min(n,totalTrades));
   });
-  // pemenang = AI dengan equity akhir tertinggi
-  let bestId=state.ais[0].id,bestEq=battleCfg.endEquity[state.ais[0].id];
-  state.ais.forEach(a=>{if((battleCfg.endEquity[a.id]||0)>bestEq){bestEq=battleCfg.endEquity[a.id];bestId=a.id;}});
-  battleCfg.winnerId=bestId;
+  // pemenang ditentukan otomatis di startBattle() berdasarkan PnL gain
   go('battle');
   startBattle();
 }
@@ -1436,11 +1431,8 @@ function loadBattleCfg(){
     winnerId:'',
     durationSec:20,
     period:'Periode 1 Minggu',
-    tradesPerAI:{},
-    startEquity:{},
-    endEquity:{},
-    flucPct:6,
-    pairCats:['CRYPTO'],   // kategori pair dicentang manual
+    tradesPerAI:{}, // per-AI: berapa trade terakhir yang dimainkan
+    pairCats:['CRYPTO'],
   };
 }
 /* daftar ticker bersih (hemat space): XAU + 20 top crypto */
@@ -1471,19 +1463,34 @@ function renderBattle(){
 
   let cfgRows='';
   battleCfg.participantIds.forEach(id=>{
-    const ai=state.ais.find(a=>a.id===id);const th=themeOf(ai);
-    const tc=battleCfg.tradesPerAI[id]||10;
-    const se=battleCfg.startEquity[id]!==undefined?battleCfg.startEquity[id]:0;
-    const ee=battleCfg.endEquity[id]!==undefined?battleCfg.endEquity[id]:500;
+    const ai=state.ais.find(a=>a.id===id);if(!ai)return;
+    const th=themeOf(ai);
+    const totalTrades=Math.max(0,(ai.equity||[]).length-1);
+    const n=Math.max(1,Math.min(battleCfg.tradesPerAI[id]||Math.min(totalTrades,20),totalTrades));
+    const startIdx=Math.max(0,totalTrades-n);
+    const startEq=Math.round((ai.equity||[])[startIdx]||0);
+    const endEq=Math.round((ai.equity||[])[(ai.equity||[]).length-1]||0);
+    const pnl=endEq-startEq;
+    const noData=totalTrades<1;
     cfgRows+=`
-      <div class="bcfg-row">
-        <div class="bcfg-name"><span class="rc-dot" style="background:${th.c};box-shadow:0 0 6px ${th.c}"></span>${esc(ai.name)}</div>
-        <div class="bcfg-inputs">
-          <label>Modal awal<input class="inp mono bcfg-in" type="number" value="${se}" oninput="setStartEq('${id}',this.value)"></label>
-          <label>Hasil akhir<input class="inp mono bcfg-in" type="number" value="${ee}" oninput="setEndEq('${id}',this.value)"></label>
-          <label>Jml trade<input class="inp mono bcfg-in" type="number" min="1" value="${tc}" oninput="setTrades('${id}',this.value)"></label>
-          <label>Menang<input type="radio" name="winner" ${battleCfg.winnerId===id?'checked':''} onchange="battleCfg.winnerId='${id}'"></label>
+      <div class="bcfg-row" style="border-color:${th.c}33">
+        <div class="bcfg-name">
+          <span class="rc-dot" style="background:${th.c};box-shadow:0 0 6px ${th.c}"></span>
+          <span style="color:${th.c}">${esc(ai.name)}</span>
+          <span style="margin-left:auto;font-size:10px;color:var(--txt-faint);font-weight:400">${totalTrades} trade</span>
         </div>
+        ${noData?`<div style="font-size:11px;color:var(--loss);padding:2px 0">⚠ Belum ada data equity — isi jurnal AI ini dulu.</div>`:`
+        <div class="bcfg-inputs">
+          <label>Trade terakhir (maks ${totalTrades})
+            <input class="inp mono bcfg-in" type="number" min="1" max="${totalTrades}" value="${n}"
+              oninput="setTrades('${id}',this.value,${totalTrades});updateTradePreview('${id}')">
+          </label>
+        </div>
+        <div id="tradePreview-${id}" style="margin-top:8px;font-size:10px;color:var(--txt-dim);padding:6px 8px;background:var(--bg-deep);border-radius:7px;line-height:1.6">
+          📍 Dari trade #${startIdx+1} → #${totalTrades} &nbsp;|&nbsp;
+          <span style="font-family:var(--mono);color:var(--txt)">Equity: ${startEq} → ${endEq}</span>
+          &nbsp;<span style="color:${pnl>=0?'var(--profit)':'var(--loss)'};">${pnl>0?'+':''}${pnl}</span>
+        </div>`}
       </div>`;
   });
 
@@ -1501,14 +1508,11 @@ function renderBattle(){
     ${avail.length?`<select class="inp" id="addPart" style="margin-top:8px"><option value="">+ Tambah peserta...</option>${avail.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>`:'<p style="font-size:11px;color:var(--txt-faint);margin-top:8px">Semua AI sudah jadi peserta.</p>'}
 
     ${battleCfg.participantIds.length?`
-    <label class="field-label" style="margin-top:16px">Pengaturan per AI</label>
+    <label class="field-label" style="margin-top:16px">Pengaturan per AI <span style="font-size:9px;color:var(--txt-faint);text-transform:none;font-weight:400;letter-spacing:0">(equity nyata dari jurnal)</span></label>
     <div class="bcfg-list">${cfgRows}</div>
 
     <label class="field-label" style="margin-top:14px">Durasi Battle (detik) — semua selesai bareng</label>
     <input class="inp mono" id="durInp" type="number" min="3" value="${battleCfg.durationSec}" oninput="battleCfg.durationSec=parseInt(this.value)||20">
-
-    <label class="field-label" style="margin-top:10px">Range fluktuasi equity (%)</label>
-    <input class="inp mono" id="flucInp" type="number" value="${battleCfg.flucPct}" oninput="battleCfg.flucPct=parseFloat(this.value)||6">
 
     <button class="btn primary full" style="margin-top:18px" onclick="startBattle()">▶ Mulai Battle</button>
     `:''}
@@ -1523,9 +1527,11 @@ function togglePairCat(cat){
 }
 function addParticipant(id){
   if(!battleCfg.participantIds.includes(id))battleCfg.participantIds.push(id);
-  if(battleCfg.tradesPerAI[id]===undefined)battleCfg.tradesPerAI[id]=10;
-  if(battleCfg.startEquity[id]===undefined)battleCfg.startEquity[id]=0;
-  if(battleCfg.endEquity[id]===undefined)battleCfg.endEquity[id]=500;
+  if(battleCfg.tradesPerAI[id]===undefined){
+    const ai=state.ais.find(a=>a.id===id);
+    const totalTrades=Math.max(0,(ai?.equity||[]).length-1);
+    battleCfg.tradesPerAI[id]=Math.max(1,Math.min(totalTrades,20));
+  }
   renderBattle();
 }
 function removeParticipant(id){
@@ -1533,10 +1539,23 @@ function removeParticipant(id){
   if(battleCfg.winnerId===id)battleCfg.winnerId='';
   renderBattle();
 }
-function setTrades(id,v){battleCfg.tradesPerAI[id]=Math.max(1,parseInt(v)||1);}
-function setStartEq(id,v){battleCfg.startEquity[id]=parseFloat(v)||0;}
-function setEndEq(id,v){battleCfg.endEquity[id]=parseFloat(v)||0;}
-function _removed(){}
+function setTrades(id,v,maxN){
+  const n=Math.max(1,parseInt(v)||1);
+  battleCfg.tradesPerAI[id]=maxN?Math.min(n,maxN):n;
+}
+function updateTradePreview(id){
+  const ai=state.ais.find(a=>a.id===id);if(!ai)return;
+  const totalTrades=Math.max(0,(ai.equity||[]).length-1);
+  const n=Math.max(1,Math.min(battleCfg.tradesPerAI[id]||1,totalTrades));
+  const startIdx=Math.max(0,totalTrades-n);
+  const startEq=Math.round((ai.equity||[])[startIdx]||0);
+  const endEq=Math.round((ai.equity||[])[(ai.equity||[]).length-1]||0);
+  const pnl=endEq-startEq;
+  const el=document.getElementById('tradePreview-'+id);
+  if(el)el.innerHTML=`📍 Dari trade #${startIdx+1} → #${totalTrades} &nbsp;|&nbsp;`
+    +`<span style="font-family:var(--mono);color:var(--txt)">Equity: ${startEq} → ${endEq}</span>`
+    +` &nbsp;<span style="color:${pnl>=0?'var(--profit)':'var(--loss)'};">${pnl>0?'+':''}${pnl}</span>`;
+}
 
 /* ---------- BATTLE ARENA (animation) ---------- */
 let battleRunning=false;
@@ -1547,36 +1566,41 @@ function startBattle(){
   if(!battleCfg.participantIds.length){toast('Pilih peserta dulu');return;}
   const parts=battleCfg.participantIds.map(id=>state.ais.find(a=>a.id===id)).filter(Boolean);
   if(!parts.length)return;
-  if(!battleCfg.winnerId)battleCfg.winnerId=parts[0].id;
 
   const dur=Math.max(3,battleCfg.durationSec)*1000;
-  const fl=battleCfg.flucPct!=null?battleCfg.flucPct:6;
   const cats=battleCfg.pairCats.length?battleCfg.pairCats:['CRYPTO'];
+
   const plan=parts.map(ai=>{
-    const n=battleCfg.tradesPerAI[ai.id]||10;
-    const st=battleCfg.startEquity[ai.id]!==undefined?battleCfg.startEquity[ai.id]:0;
-    const end=battleCfg.endEquity[ai.id]!==undefined?battleCfg.endEquity[ai.id]:500;
-    // generator sinkron: history & equity dari satu sumber
-    const seq=genTradeSequence(st,end,n,2);
-    const eqPts=seq.equity; // n+1 titik (incl modal awal)
-    // interval acak yang totalnya = durasi (semua selesai bareng)
-    let raw=[];for(let i=0;i<n;i++)raw.push(0.5+Math.random());
+    const totalTrades=Math.max(0,(ai.equity||[]).length-1);
+    const n=Math.max(1,Math.min(battleCfg.tradesPerAI[ai.id]||Math.min(totalTrades,20),totalTrades));
+    const startIdx=Math.max(0,totalTrades-n);
+    // ambil slice equity nyata dari AI
+    const eqPts=(ai.equity&&ai.equity.length>=2)?ai.equity.slice(startIdx):[0,0];
+    const actualN=Math.max(1,eqPts.length-1);
+    // distribusi waktu random (semua selesai tepat pada dur)
+    let raw=[];for(let i=0;i<actualN;i++)raw.push(0.5+Math.random());
     const sum=raw.reduce((a,b)=>a+b,0);
     let t=0;const times=raw.map(r=>{t+=r/sum*dur;return t;});
+    // buat list trade dari delta equity nyata
     const trades=[];
-    for(let i=0;i<n;i++){
-      const st2=seq.trades[i];
+    for(let i=0;i<actualN;i++){
+      const delta=eqPts[i+1]-eqPts[i];
+      const realTrade=ai.trades&&ai.trades[startIdx+i]; // gunakan data trade asli jika ada
       trades.push({
-        sym:randTicker(cats),
-        side:Math.random()<0.5?'BUY':'SELL',
-        color:st2.color,
-        pl:st2.pl,
+        sym:realTrade?.sym||randTicker(cats),
+        side:realTrade?.side||(Math.random()<0.5?'BUY':'SELL'),
+        color:delta>=0?'profit':'loss',
+        pl:delta,
+        equityAfter:eqPts[i+1],
         appearAt:times[i],
-        equityAfter:st2.cum,
       });
     }
-    return {ai,trades,eqPts,n,end};
+    const pnlGain=eqPts[eqPts.length-1]-eqPts[0];
+    return {ai,trades,eqPts,n:actualN,end:pnlGain};
   });
+
+  // pemenang otomatis: AI dengan PnL gain terbesar di periode yang dipilih
+  battleCfg.winnerId=plan.reduce((best,p)=>(p.end>best.end?p:best),plan[0]).ai.id;
 
   buildArena(parts,plan,dur);
 }
@@ -1764,7 +1788,15 @@ function finishBattle(plan){
     }
   }
 }
-function bestByEquity(plan){let b=plan[0];plan.forEach(p=>{if(p.end>b.end)b=p;});return b.ai.id;}
+function bestByEquity(plan){
+  let b=plan[0];
+  plan.forEach(p=>{
+    const pnlP=p.eqPts[p.eqPts.length-1]-p.eqPts[0];
+    const pnlB=b.eqPts[b.eqPts.length-1]-b.eqPts[0];
+    if(pnlP>pnlB)b=p;
+  });
+  return b.ai.id;
+}
 
 function exitArena(){
   battleRunning=false;
